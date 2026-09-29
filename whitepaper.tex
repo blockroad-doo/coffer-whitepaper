@@ -1,0 +1,174 @@
+\documentclass{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{amsmath}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage[margin=1in]{geometry}
+
+\title{Coffer}
+\author{Ivan Glavaš and Tomislav Glavaš}
+\date{Version 1.0, August 2026}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+On one side, ETH holders have their assets sitting idle, earning no yield. On the other side, validators have their ETH locked up and cannot use it as liquidity, and the existing routes to that liquidity rely on oracles and governance. Validators who prefer to keep running their own hardware and do not want to reduce their stake may wish to access that locked-up liquidity by giving up a share of their income over time. This proposal introduces a non-custodial dApp whose contracts rely on the Ethereum protocol alone, with no oracles and no governance, through which validators issue a transferable bond to holders and in return receive ETH. The bond has a fixed maturity date after which the holder is able to redeem their principal plus the accrued interest, less a protocol fee. The bond's interest rate remains fixed, regardless of network conditions over the bond's term. Issuing and settling bonds does not require the validator to exit or reduce stake. A validator that pays each bond at maturity retains validator status throughout. If a matured bond is not paid, the validator is in default, and the entire stake can then be withdrawn to the contract to pay the holders.
+\end{abstract}
+
+\section{Parameters}
+
+With the Pectra update, execution-layer triggerable withdrawals are introduced. With this in mind, a validator can set withdrawal credentials to a smart contract. The stake can then be withdrawn only to that contract, and the contract itself can trigger withdrawals, including the validator's full exit. This is the mechanism by which a validator issues a bond backed by the validator's stake. The variables relevant to issuing a bond are:
+
+\begin{center}
+\begin{tabularx}{\linewidth}{@{}c X@{}}
+\toprule
+\textbf{Symbol} & \textbf{Description} \\
+\midrule
+\multicolumn{2}{@{}l}{\textit{Bond terms}} \\
+\(P\)      & Principal: the ETH amount the holder pays for the bond \\
+\(I\)      & Interest: the total interest accrued over the bond's term \\
+\(n\)      & Bond duration, in days \\
+\(r\)      & Annual interest rate \\
+\(M\)      & Maturity value: the amount the holder receives at maturity, net of the fee \\
+\addlinespace
+\multicolumn{2}{@{}l}{\textit{System state}} \\
+\(E\)      & Execution-layer balance: ETH held in the Coffer contract \\
+\(C\)      & Consensus-layer balance: the validator's balance on the beacon chain \\
+\(B\)      & The validator's total balance, \(B = E + C\) \\
+\(R\)      & Buffer: the fraction of the consensus-layer balance held in reserve against potential penalties \\
+\(\Sigma\) & Outstanding bonds: the total maturity value of bonds that have been issued and not yet redeemed \\
+\(S\)      & Bond issue size: the amount currently available to a validator for issuing bonds \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\subsection{Interest rate}
+
+Interest is simple, with full principal repayment at maturity, so the amount owed does not grow through compounding. The simple interest is calculated as follows:
+
+\[
+    I = \frac{P \cdot r \cdot n}{365}
+\]
+
+On-chain, the duration is expressed in seconds rather than days, and the rate \(r\) uses a fixed-point scale in which \(10^8\) represents 100\%. The computed interest is equivalent.
+
+\subsection{Penalties}
+Validators face several penalties, such as missed attestations, missed sync committee duties, the inactivity leak and slashing. The parameter \(R\) is the validator's chosen \textit{buffer}, the fraction of the consensus-layer balance held in reserve against these costs. It is a conservatism estimate set by the validator and evaluated by the holder. It is not a protocol-enforced upper bound on the penalties that can actually occur.
+
+If realized penalties stay within the reserved buffer (a fraction \(R\) of the consensus-layer balance), all bonds remain fully backed. If they exceed it, the bonds are no longer fully backed. The protocol does not prevent this, so the holder limits the risk before buying by choosing a validator whose buffer \(R\) and outstanding issuance leave room for the penalties that validator can realistically face over the bond's term, as described in Considering risks.
+
+\subsection{Relation between bond issue size and maturity value}
+The maturity value \(M\) is the amount the holder receives at maturity. It is the principal plus the interest, less the fee charged when the bond is bought (see Fees, below):
+\[
+    M = P + I - \text{fee}
+\]
+
+The bond issue size \(S\) is the amount currently available to a validator for issuing bonds. It is the execution-layer balance, plus the consensus-layer balance net of the reserved buffer (a fraction \(R\) of the consensus balance), less the total maturity value of outstanding bonds:
+\[
+    S = E + C(1 - R) - \Sigma
+\]
+Issuing a bond reduces \(S\) by its maturity value \(M\). The buffer applies only to the consensus-layer balance \(C\), since penalties reduce consensus funds, whereas ETH held in the contract (\(E\)) is fully available. The validator increases \(S\) by sending ETH to the contract, which raises \(E\) and increases \(S\) by the full amount, or by topping up the consensus balance \(C\), which increases \(S\) net of the buffer. Redeeming a bond does not change \(S\). The redemption removes the bond's maturity value from the contract balance \(E\) and removes the same amount from the outstanding bonds \(\Sigma\), and these offset. The principal \(P\) is paid by the holder to the Coffer contract, which forwards the principal net of the fee to the validator's address and the fee to the protocol. The principal is not retained by the contract as backing. The backing for a bond is the validator's total balance \(B\), separate from the principal.
+
+A bond can be issued only when its maturity value is within the available issue size:
+\[
+    M \leq S
+\]
+
+\subsection{Fees}
+The Coffer contracts charge one fee, a fee on buying a bond, charged as a percentage of the bond's interest. The fee is determined by the contract code and is not set or adjusted by any party.
+
+The fee is fixed at the moment the bond is bought, using the schedule value at that time, and does not change afterwards. The holder bears the fee, which reduces the bond's maturity value. The percentage follows a fixed schedule that depends only on the time elapsed since deployment. It starts low, rises over time and levels off at a maximum fixed at deployment. The schedule is part of the contract code, and the percentage at any time is computable from the contract. Later points on the schedule do not affect bonds already bought.
+
+Accrued fees are directed to the recipient role.
+
+\section{Coffer contract}
+
+Coffer is permissionless and non-custodial software. The contract code is immutable and the fee amount follows a fixed schedule that no party can change. The address that receives accrued fees can be updated, and this alters neither the fee amount nor any contract behaviour. The issuing validator can adjust the terms of their own Coffer, such as the interest rate, the minimum and maximum duration, the minimum value to accept, the issue size, the buffer and whether bond issuance is active, but only in ways that maintain or improve the backing of outstanding bonds, as described in Validator redeeming bonds.
+
+A validator creates a Coffer contract and sets it as their withdrawal credentials on the consensus layer, which gives the validator the option to issue bonds to ETH holders. A bond is an arrangement where a holder pays ETH to a validator for an agreed-upon duration and receives the bond's maturity value at maturity. The validator sets the bond terms and holders buy bonds by calling the contract. The principal, net of the protocol fee, is paid to the validator's address.
+
+\subsection{Managing validator's balance}
+
+Withdrawals of a validator's balance through smart contracts are possible with EIP 7002, introduced in the Pectra update. A withdrawal uses a contract which expects certain data and value in order to trigger a withdrawal, and the withdrawn funds are paid to the validator's withdrawal address. A validator who sets the Coffer contract as their withdrawal address makes all of Coffer's features available. This way, validators issue bonds as well as pause bond issuance at any time. As any validator can top up their consensus-layer balance, the Coffer contract is also the means by which a validator adds funds to it.
+
+\subsubsection{Validator withdrawals}
+
+A Coffer contract that has no outstanding bonds permits the validator to withdraw the full amount held in the Coffer contract. This also implies that the validator can exit their validator to the Coffer contract and withdraw the full amount to their private address. When outstanding bonds exist, the validator can withdraw contract funds up to the bond issue size \(S\), the capacity not committed to bonds. Consensus-layer withdrawals always arrive in the Coffer contract, never at the validator's address, so the committed capacity cannot leave except as payment on a bond.
+
+\subsubsection{Holder withdrawals}
+
+A holder can redeem a bond at or after its maturity and is paid from the funds held in the Coffer contract. Redeeming a bond needs no consensus-layer request from the holder, because the payment comes from funds already in the contract. Keeping the contract funded so that every matured bond can be paid in full is the validator's duty, and failing it puts the validator in default.
+
+\subsubsection{Validator default}
+
+When a matured bond cannot be paid in full from the funds held in the Coffer contract, any party can declare the validator in default. The declaration requires no cooperation from the validator. A default has three effects:
+
+\begin{enumerate}
+    \item Bond issuance stops and the validator's withdrawals are frozen.
+    \item Every outstanding bond becomes redeemable at its full maturity value, whether matured or not.
+    \item Any party can request the validator's full exit, which withdraws the validator's entire remaining stake to the Coffer contract, where it pays claims in the order they are made.
+\end{enumerate}
+
+The only way to prevent a default is to pay, by funding the contract or by redeeming the bond, and the only way out of one is also to pay. A default stands until every outstanding bond has received its full maturity value. Once that happens, the validator can clear the default and withdraw the funds that remain in the contract. An exit requested during the default cannot be revoked, so a validator whose exit has been requested is exited even if every bond is settled first, and the swept stake also arrives in the contract. For such a validator, clearing the default means taking what is left. A validator that settles every bond before any exit is requested keeps validator status and can issue bonds again.
+
+\subsubsection{Validator redeeming bonds}
+A validator may want to change the terms under which they issue bonds. Variables can be changed at any time, but an adjustment can only maintain or improve the backing of outstanding bonds, regardless of network state. Because the validator is limited in how bond terms can change while outstanding bonds exist, the validator can instead redeem existing bonds to adjust their terms. The validator can redeem a bond before or after its maturity, and in both cases the holder receives the full maturity value. Before maturity the holder is paid ahead of schedule. After maturity the validator never needs this path to pay the bond, since a funded contract is enough and the holder redeems it, but a matured bond that its holder never redeems still counts as outstanding and keeps the restrictions on terms and on withdrawals in force. Redeeming it is the only way the validator can settle such a bond without the holder. Validator redemption remains available to a validator in default, and settling every remaining bond this way is the fastest path out of one.
+
+\section{Use Cases}
+Using locked-up ETH as liquidity is the function Coffer provides to validators and holders. A validator accesses locked liquidity without exiting their validator. A holder earns interest on their ETH, backed by the validator's stake and enforced through the smart contract. A validator can issue bonds to multiple holders.
+
+The software is permissionless. Whether a given person may issue or buy bonds depends on the laws applicable to that person, which are their own responsibility.
+
+\subsection{Secondary market}
+Each bond is represented by an NFT, minted when the bond is issued. Each bond is unique. It is issued individually against one specific validator, with its own principal, interest, and maturity, and is not part of a fungible series or collection. Bonds are not interchangeable with one another, as each is tied to the stake and terms of the validator that issued it. The NFT holder has the exclusive right to receive the bond's maturity value (its principal plus interest, less the fee) at the bond's maturity. After the bond's maturity date is reached, the NFT holder can redeem the bond. A holder who wants liquidity before the bond's maturity can transfer the bond by transferring the NFT to another party.
+
+The Coffer protocol contracts do not operate a trading venue. A bond is transferred by transferring its NFT. Any marketplace through which bonds are bought, sold, or matched is a separate system, not part of the Coffer protocol contracts.
+
+\subsection{Leveraging Earnings}
+
+Staking rewards on the consensus layer depend on the number of active validators on the network, which makes the trend of those rewards relatively predictable. A validator receives ETH when issuing bonds and deploys that ETH as they choose, including staking it. A validator that earns more yield than it pays out on sold bonds increases its overall earnings.
+
+\section{Considering risks}
+
+\subsection{Validator}
+A validator's income varies with changes in total network stake, occasional sync committee and block rewards, and brief offline periods. A bond's interest is fixed at issuance. When a validator's realized income over a bond's term is less than the interest owed, the difference is covered from the validator's stake. The interest a validator offers and the likelihood a bond is bought are related. A higher interest rate is more likely to attract a holder, and also raises the amount the validator covers from stake if realized income falls short. When a matured bond is not paid, the validator is in default, with the consequences described in Validator default.
+
+\subsection{Holder}
+A bond's parameters are set by the validator and are observable by the holder before buying. The holder evaluates a bond before purchase, because the protocol enforces no minimum backing beyond what is observable at issuance. The contract does not read the consensus layer. The consensus-layer balance behind the issue size is the value the validator reports when the Coffer is created, and the link between the Coffer and the validator is the withdrawal credential the validator sets on the consensus layer. The protocol verifies neither. Before buying, the holder checks on the consensus layer that the validator's withdrawal credentials point at the Coffer contract and that the validator's balance supports the issue size. The issue size does not follow the consensus-layer balance on its own. Rewards and penalties change the backing without changing the issue size. Until a default is declared, the validator keeps the withdrawal capacity described in Validator withdrawals, and the protocol does not reduce that capacity for penalties. The holder can observe whether a bond's maturity value is within the issue size (\(M \leq S\)), what buffer \(R\) the validator has set against the bond's duration, and whether the validator is one of several under common control, which raises correlated-slashing exposure. The check \(M \leq S\) is an at-issuance check on capacity. It does not by itself describe whether the backing holds over the bond's term if the validator's balance later falls. A validator operating near the top of its issue size without a buffer that reflects its concentration is one a holder can choose to avoid in favour of another validator. The buffer is a conservatism estimate set by the validator, not a protocol-enforced bound, and a holder considers these risks before buying, since they cannot be addressed afterwards.
+
+\subsection{Offline penalties}
+While the chain continues to finalize, a validator that fails to perform its attestation or sync committee duties loses a portion of its consensus-layer balance to missed-duty penalties. This loss accrues gradually over the time the validator is offline and reduces the consensus-layer balance \(C\). Being offline is never in a validator's interest, but it can still happen. Choosing the buffer \(R\) therefore depends on the bond's duration, since the holder expects enough reserve on the consensus layer to keep a bond backed even if the validator goes offline for a long period.
+
+\subsection{Slashing}
+A slashed validator loses an initial penalty plus a further amount that increases with how much stake is slashed together with it in the same window (its correlated-slashing exposure). A validator that is one of several operated by a single entity, or one of several Coffers under common control, therefore carries higher slashing exposure than an isolated validator, since a single cause can slash them together. The buffer \(R\) is chosen by the validator, not enforced by the protocol, and a validator near the top of its issue size has no incentive to increase it. Whether \(R\) is conservative enough for a validator's concentration and a bond's duration is therefore not guaranteed by the protocol. It is a property the holder evaluates before buying.
+
+\subsection{Inactivity leak and network-wide slashing}
+Two network-wide events are not bounded by any buffer. In an \textbf{inactivity leak}, where the chain stops finalizing because a large fraction of the network is offline, attestation penalties grow with time and can reach the entire balance. In a \textbf{network-wide correlated slashing event}, where a large fraction of total stake is slashed at once, the slashing penalty approaches the entire balance. These events require a failure at the scale of the whole network, not the behaviour of any single validator or entity, and no value of \(R\) eliminates them. A long-duration bond carries residual exposure to them.
+
+\subsection{Technology}
+Coffer is a set of smart contracts. The behaviour of a bond depends on the correctness of these contracts and on the consensus-layer mechanisms they rely on, including execution-layer triggerable withdrawals (EIP 7002). A defect in the contracts, or a change to a consensus-layer mechanism a bond depends on, can affect whether and how a bond is redeemed. Consensus-layer withdrawals that fund the contract, such as the validator's partial withdrawals and the exit sweep in a default, depend on the withdrawal request mechanism and its queue. Periods of network congestion can delay them.
+
+\subsection{User interface}
+The Coffer contracts do not read the consensus layer. The clearest example is the total network stake, an input to penalty calculation that the contracts leave unread. Because of this, some parameters relevant to evaluating a bond are computed and presented off-chain rather than read on-chain. The user interface presents these parameters and the arithmetic relating them, so that the holder evaluates a bond from its underlying components rather than from a summary indicator.
+
+\section*{Disclaimer}
+
+This paper is published for general information purposes only and describes the Coffer smart contracts at a technical level. It does not constitute, and must not be relied on as, investment, financial, tax, accounting, or legal advice, nor as any recommendation or solicitation to acquire, dispose of, supply, or otherwise transact in any digital asset, token, or smart contract position. Nothing in this paper is an offer of securities or of any other financial instrument.
+
+The terminology used throughout this paper is used solely in a descriptive and functional sense to refer to the mechanical behaviour of the Coffer smart contracts. In particular, the terms ``bond'', ``issue'', ``issuance'', ``issue size'', ``principal'', ``interest'', ``interest rate'', ``maturity'', ``redeem'', ``default'', ``declare'', ``exit'', ``settle'', ``claim'', ``yield'', ``buy'', ``purchase'', ``buffer'', ``backing'', ``backed'', ``stake'', ``holder'', ``validator'', ``secondary market'', ``fee'', ``schedule'', ``recipient role'', and any cognate terms, are used in a descriptive and functional sense to refer to the mechanical behaviour of the Coffer smart contracts. None of these terms is intended to denote, and none should be construed as denoting, the smart contracts, the bonds, or the actions of any participant as a security, a financial instrument, a regulated derivative, a bond, a note, a debenture, a fixed-income obligation, a commodity contract, a deposit, a loan within the meaning of any applicable banking, securities, or financial-services regulation, a collective investment scheme, electronic money, or a regulated trading, clearing, or settlement venue. Any resemblance between the vocabulary used herein and concepts defined under applicable laws or regulations is incidental and does not reflect the legal characterisation of the protocol, its components, or the activities of its users.
+
+Bonds are not deposits and are not covered by any deposit guarantee scheme or investor compensation scheme. A bond may lose its value in part or in full, may not always be transferable, and may not be liquid.
+
+The Coffer smart contract source code is published under the licence set out in the contract repositories, and is provided ``as is'', without warranty of any kind, express or implied, including without limitation any warranty of merchantability, fitness for a particular purpose, non-infringement, or accuracy.
+
+Any returns, rates, yields, or other figures referenced in this paper or in related communications are variable, indicative only, not guaranteed, and subject to change. Use of the protocol may be restricted in certain jurisdictions, and users are solely responsible for compliance with all laws and regulations applicable to them. The statements in this paper are current as of the date of publication and are subject to change without notice and without any obligation to update.
+
+Coffer is software published by the authors. A bond is issued by a validator and is backed by that validator's own stake. The Coffer contract code is immutable and cannot be upgraded. The address receiving accrued fees can be updated, and the issuing validator can adjust the terms of their own Coffer only in ways that maintain or improve the backing of outstanding bonds. No party controls a bond after it is issued, other than the issuing validator's ability to redeem a bond before or after its maturity, which settles the bond at its full maturity value and is therefore never to the holder's detriment. If a matured bond is not paid, the contract code permits any party to declare a default, after which every bond is redeemable at its full maturity value and the validator's remaining stake can be withdrawn to the contract to pay the holders. The behaviour and payout of a bond are determined by the contract code.
+
+To the maximum extent permitted by applicable law, the authors disclaim any and all liability for any direct, indirect, incidental, consequential, or special losses, damages, costs, or claims arising from or in connection with any reliance on this paper or any use of the Coffer smart contracts.
+
+\end{document}
